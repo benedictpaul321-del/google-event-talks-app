@@ -1,0 +1,388 @@
+// State Management
+let state = {
+    releases: [],
+    selectedIds: new Set(),
+    activeCategory: 'all',
+    searchQuery: '',
+    lastUpdated: null
+};
+
+// DOM Elements
+const elements = {
+    refreshBtn: document.getElementById('btn-refresh'),
+    refreshIcon: document.getElementById('refresh-icon'),
+    lastUpdatedText: document.getElementById('last-updated-text'),
+    searchInput: document.getElementById('search-input'),
+    searchClearBtn: document.getElementById('search-clear-btn'),
+    categoryFilters: document.getElementById('category-filters'),
+    releasesGrid: document.getElementById('releases-grid'),
+    loadingState: document.getElementById('loading-state'),
+    errorState: document.getElementById('error-state'),
+    errorMessage: document.getElementById('error-message'),
+    emptyState: document.getElementById('empty-state'),
+    btnRetry: document.getElementById('btn-retry'),
+    btnClearSearch: document.getElementById('btn-clear-search'),
+    
+    // Floating Selection Bar
+    selectionBar: document.getElementById('selection-bar'),
+    selectionCount: document.getElementById('selection-count'),
+    btnClearSelection: document.getElementById('btn-clear-selection'),
+    btnTweetMulti: document.getElementById('btn-tweet-multi'),
+    
+    // Modal
+    tweetModal: document.getElementById('tweet-modal'),
+    modalCloseBtn: document.getElementById('modal-close-btn'),
+    modalCancelBtn: document.getElementById('modal-cancel-btn'),
+    tweetTextarea: document.getElementById('tweet-textarea'),
+    charCounter: document.getElementById('char-counter'),
+    charWarningMsg: document.getElementById('char-warning-msg'),
+    btnPublishTweet: document.getElementById('btn-publish-tweet'),
+    styleBtnSummary: document.getElementById('style-btn-summary'),
+    styleBtnThread: document.getElementById('style-btn-thread')
+};
+
+// Active Tweet Modal Configuration
+let tweetModalConfig = {
+    style: 'summary', // 'summary' or 'thread'
+    targetIds: [] // IDs of releases to tweet
+};
+
+// Initialize App
+document.addEventListener('DOMContentLoaded', () => {
+    fetchReleases();
+    setupEventListeners();
+});
+
+// Setup Events
+function setupEventListeners() {
+    elements.refreshBtn.addEventListener('click', () => fetchReleases(true));
+    elements.btnRetry.addEventListener('click', () => fetchReleases(true));
+    elements.searchInput.addEventListener('input', handleSearch);
+    elements.searchClearBtn.addEventListener('click', clearSearch);
+    elements.btnClearSearch.addEventListener('click', () => {
+        clearSearch();
+        setCategoryFilter('all');
+    });
+    elements.categoryFilters.addEventListener('click', (e) => {
+        const pill = e.target.closest('.filter-pill');
+        if (pill) {
+            setCategoryFilter(pill.dataset.category);
+        }
+    });
+    elements.btnClearSelection.addEventListener('click', clearSelection);
+    elements.btnTweetMulti.addEventListener('click', openMultiTweetModal);
+    elements.modalCloseBtn.addEventListener('click', closeTweetModal);
+    elements.modalCancelBtn.addEventListener('click', closeTweetModal);
+    elements.tweetTextarea.addEventListener('input', updateCharCounter);
+    elements.btnPublishTweet.addEventListener('click', publishTweet);
+    elements.styleBtnSummary.addEventListener('click', () => setTweetStyle('summary'));
+    elements.styleBtnThread.addEventListener('click', () => setTweetStyle('thread'));
+    elements.tweetModal.addEventListener('click', (e) => {
+        if (e.target === elements.tweetModal) closeTweetModal();
+    });
+}
+
+// Fetch releases from API
+async function fetchReleases(forceRefresh = false) {
+    showLoading();
+    setRefreshIconState(true);
+    
+    try {
+        const url = forceRefresh ? '/api/releases?refresh=true' : '/api/releases';
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`Server returned HTTP status ${response.status}`);
+        const data = await response.json();
+        if (data.error) throw new Error(data.error);
+        
+        state.releases = data.releases;
+        state.lastUpdated = data.last_updated;
+        updateLastUpdatedText(state.lastUpdated);
+        renderFeed();
+        
+    } catch (error) {
+        showError(error.message);
+    } finally {
+        setRefreshIconState(false);
+    }
+}
+
+function setRefreshIconState(isSpinning) {
+    if (isSpinning) {
+        elements.refreshIcon.classList.add('spinning');
+        elements.refreshBtn.disabled = true;
+    } else {
+        elements.refreshIcon.classList.remove('spinning');
+        elements.refreshBtn.disabled = false;
+    }
+}
+
+function updateLastUpdatedText(timestamp) {
+    if (!timestamp) {
+        elements.lastUpdatedText.textContent = "Never updated";
+        return;
+    }
+    const date = new Date(timestamp * 1000);
+    const options = { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' };
+    elements.lastUpdatedText.textContent = `Last updated: ${date.toLocaleDateString(undefined, options)}`;
+}
+
+function renderFeed() {
+    const filtered = state.releases.filter(release => {
+        const matchesCategory = state.activeCategory === 'all' || 
+                                release.category.toLowerCase() === state.activeCategory.toLowerCase();
+        const textToSearch = `${release.title} ${release.content}`.toLowerCase();
+        const matchesSearch = textToSearch.includes(state.searchQuery.toLowerCase());
+        return matchesCategory && matchesSearch;
+    });
+    
+    elements.loadingState.style.display = 'none';
+    elements.errorState.style.display = 'none';
+    elements.emptyState.style.display = 'none';
+    elements.releasesGrid.style.display = 'grid';
+    
+    if (filtered.length === 0) {
+        elements.releasesGrid.style.display = 'none';
+        elements.emptyState.style.display = 'flex';
+        return;
+    }
+    
+    elements.releasesGrid.innerHTML = '';
+    filtered.forEach((release, index) => {
+        const isSelected = state.selectedIds.has(release.id);
+        const card = document.createElement('div');
+        card.className = `release-card ${isSelected ? 'selected' : ''}`;
+        card.dataset.id = release.id;
+        
+        const badgeClass = getBadgeClass(release.category);
+        card.innerHTML = `
+            <div class="card-top">
+                <div class="card-meta">
+                    <span class="badge ${badgeClass}">${release.category}</span>
+                    <span class="card-date">${release.date}</span>
+                </div>
+                <div class="select-wrapper">
+                    <div class="checkbox-custom"><i class="fa-solid fa-check"></i></div>
+                </div>
+            </div>
+            <div class="card-body">
+                <h3><a href="${release.link}" target="_blank">${release.title}</a></h3>
+                <div class="card-content">${release.content}</div>
+            </div>
+            <div class="card-actions">
+                <a href="${release.link}" target="_blank" class="link-original">
+                    Original Post <i class="fa-solid fa-arrow-up-right-from-square"></i>
+                </a>
+                <div class="card-actions-right">
+                    <button class="btn-card-action btn-tweet-card" title="Tweet this update">
+                        <i class="fa-brands fa-x-twitter"></i>
+                    </button>
+                </div>
+            </div>
+        `;
+        
+        card.addEventListener('click', (e) => {
+            if (e.target.closest('a') || e.target.closest('.btn-card-action')) return;
+            toggleCardSelection(release.id);
+        });
+        
+        const tweetBtn = card.querySelector('.btn-tweet-card');
+        tweetBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            openSingleTweetModal(release);
+        });
+        
+        elements.releasesGrid.appendChild(card);
+    });
+}
+
+function getBadgeClass(category) {
+    switch(category.toLowerCase()) {
+        case 'feature': return 'feat';
+        case 'change': return 'chg';
+        case 'fix': return 'fix';
+        case 'deprecation': return 'dep';
+        case 'announcement': return 'ann';
+        default: return 'gen';
+    }
+}
+
+function showLoading() {
+    elements.loadingState.style.display = 'flex';
+    elements.releasesGrid.style.display = 'none';
+    elements.errorState.style.display = 'none';
+    elements.emptyState.style.display = 'none';
+}
+
+function showError(msg) {
+    elements.errorMessage.textContent = msg;
+    elements.errorState.style.display = 'flex';
+    elements.releasesGrid.style.display = 'none';
+}
+
+function handleSearch(e) {
+    state.searchQuery = e.target.value;
+    elements.searchClearBtn.style.display = state.searchQuery.length > 0 ? 'flex' : 'none';
+    renderFeed();
+}
+
+function clearSearch() {
+    elements.searchInput.value = '';
+    state.searchQuery = '';
+    elements.searchClearBtn.style.display = 'none';
+    renderFeed();
+}
+
+function setCategoryFilter(category) {
+    state.activeCategory = category;
+    const pills = elements.categoryFilters.querySelectorAll('.filter-pill');
+    pills.forEach(pill => {
+        pill.classList.toggle('active', pill.dataset.category === category);
+    });
+    renderFeed();
+}
+
+// Selection Logic
+function toggleCardSelection(id) {
+    if (state.selectedIds.has(id)) {
+        state.selectedIds.delete(id);
+    } else {
+        state.selectedIds.add(id);
+    }
+    const card = elements.releasesGrid.querySelector(`.release-card[data-id="${id}"]`);
+    if (card) card.classList.toggle('selected');
+    updateSelectionBar();
+}
+
+function clearSelection() {
+    state.selectedIds.clear();
+    const cards = elements.releasesGrid.querySelectorAll('.release-card');
+    cards.forEach(card => card.classList.remove('selected'));
+    updateSelectionBar();
+}
+
+function updateSelectionBar() {
+    const count = state.selectedIds.size;
+    elements.selectionCount.textContent = `${count} update${count !== 1 ? 's' : ''} selected`;
+    elements.selectionBar.classList.toggle('show', count > 0);
+}
+
+// Modal and Tweeting Logic
+function openSingleTweetModal(release) {
+    tweetModalConfig.style = 'summary';
+    tweetModalConfig.targetIds = [release.id];
+    elements.styleBtnThread.style.display = 'none';
+    elements.styleBtnSummary.classList.add('active');
+    generateTweetDraft();
+    elements.tweetModal.classList.add('show');
+}
+
+function openMultiTweetModal() {
+    if (state.selectedIds.size === 0) return;
+    tweetModalConfig.targetIds = Array.from(state.selectedIds);
+    if (state.selectedIds.size > 1) {
+        elements.styleBtnThread.style.display = 'flex';
+        setTweetStyle('thread');
+    } else {
+        elements.styleBtnThread.style.display = 'none';
+        setTweetStyle('summary');
+    }
+    elements.tweetModal.classList.add('show');
+}
+
+function closeTweetModal() {
+    elements.tweetModal.classList.remove('show');
+}
+
+function setTweetStyle(style) {
+    tweetModalConfig.style = style;
+    elements.styleBtnSummary.classList.toggle('active', style === 'summary');
+    elements.styleBtnThread.classList.toggle('active', style === 'thread');
+    generateTweetDraft();
+}
+
+function cleanHtml(html) {
+    const temp = document.createElement("div");
+    temp.innerHTML = html;
+    let text = temp.innerHTML
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<\/p>/gi, '\n\n')
+        .replace(/<\/li>/gi, '\n');
+    temp.innerHTML = text;
+    return (temp.textContent || temp.innerText || "").trim().replace(/\n{3,}/g, '\n\n');
+}
+
+function generateTweetDraft() {
+    const selectedReleases = state.releases.filter(r => tweetModalConfig.targetIds.includes(r.id));
+    if (selectedReleases.length === 0) return;
+    let draft = '';
+    
+    if (tweetModalConfig.style === 'summary' || selectedReleases.length === 1) {
+        if (selectedReleases.length === 1) {
+            const release = selectedReleases[0];
+            const cleanBody = cleanHtml(release.content);
+            const truncatedBody = cleanBody.length > 150 ? cleanBody.substring(0, 150).trim() + '...' : cleanBody;
+            draft = `📢 BigQuery Update: ${release.title}\n\n${truncatedBody}\n\n🔗 Read details: ${release.link}\n\n#BigQuery #GCP #DataEngineering`;
+        } else {
+            draft = `📢 New BigQuery Release Updates:\n\n`;
+            selectedReleases.forEach((release) => {
+                draft += `• ${release.title}\n`;
+            });
+            draft += `\n🔗 Full release notes:\nhttps://cloud.google.com/bigquery/docs/release-notes\n\n#BigQuery #GCP #DataEngineering`;
+        }
+    } else {
+        draft = `🧵 BigQuery Updates Thread (1/${selectedReleases.length + 1})\n\nHere are the latest BigQuery updates you should know about. Let's dive in 👇\n\n#BigQuery #GCP #DataEngineering\n\n---`;
+        selectedReleases.forEach((release, index) => {
+            const cleanBody = cleanHtml(release.content);
+            const truncatedBody = cleanBody.length > 130 ? cleanBody.substring(0, 130).trim() + '...' : cleanBody;
+            draft += `\n\n(${index + 2}/${selectedReleases.length + 1}) ${release.title}\n\n${truncatedBody}\n\n🔗 ${release.link}\n\n---`;
+        });
+        draft = draft.replace(/\n\n---$/, '');
+    }
+    elements.tweetTextarea.value = draft;
+    updateCharCounter();
+}
+
+function updateCharCounter() {
+    const text = elements.tweetTextarea.value;
+    const length = text.length;
+    
+    if (text.includes('---')) {
+        const segments = text.split('---');
+        let maxLen = 0;
+        segments.forEach(seg => {
+            if (seg.trim().length > maxLen) maxLen = seg.trim().length;
+        });
+        elements.charCounter.textContent = `${maxLen} / 280 (max segment)`;
+        
+        const exceeds = maxLen > 280;
+        elements.charCounter.className = exceeds ? 'char-count-badge danger' : (maxLen > 250 ? 'char-count-badge warning' : 'char-count-badge');
+        elements.charWarningMsg.style.display = exceeds ? 'inline-flex' : 'none';
+        if (exceeds) elements.charWarningMsg.innerHTML = '<i class="fa-solid fa-circle-exclamation"></i> A thread segment exceeds 280 chars!';
+    } else {
+        elements.charCounter.textContent = `${length} / 280`;
+        const exceeds = length > 280;
+        elements.charCounter.className = exceeds ? 'char-count-badge danger' : (length > 250 ? 'char-count-badge warning' : 'char-count-badge');
+        elements.charWarningMsg.style.display = exceeds ? 'inline-flex' : 'none';
+        if (exceeds) elements.charWarningMsg.innerHTML = '<i class="fa-solid fa-circle-exclamation"></i> Exceeds standard X limits (280 chars)';
+    }
+}
+
+function publishTweet() {
+    const text = elements.tweetTextarea.value;
+    if (!text.trim()) return;
+    
+    if (text.includes('---')) {
+        const segments = text.split('---');
+        const firstTweetText = segments[0].trim();
+        navigator.clipboard.writeText(text).then(() => {
+            alert("📋 The entire thread content has been copied to your clipboard! We'll open Twitter now so you can write and paste your thread.");
+            window.open(`https://twitter.com/intent/tweet?text=${encodeURIComponent(firstTweetText)}`, '_blank');
+        }).catch(err => {
+            console.error('Clipboard copy failed: ', err);
+            window.open(`https://twitter.com/intent/tweet?text=${encodeURIComponent(firstTweetText)}`, '_blank');
+        });
+    } else {
+        window.open(`https://twitter.com/intent/tweet?text=${encodeURIComponent(text)}`, '_blank');
+    }
+    closeTweetModal();
+}
